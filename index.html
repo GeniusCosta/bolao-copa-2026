@@ -170,6 +170,62 @@ const RODADAS = [["r32","Segunda fase (32 avos)",16],["r16","Oitavas de final",8
 const KOKEYS = ["r32","r16","qf","sf","third","final"];
 
 /* ============================================================
+   CHAVEAMENTO OFICIAL COPA 2026 — alocação por POSIÇÃO (não cronológica)
+   Mapa r32 recuperado das 47 predições e conferido com o chaveamento FIFA.
+   Cada slot define (grupo,posição) de cada lado: pos 1=1º, 2=2º, 3=terceiro (curinga).
+   Árvore: slot k da rodada seguinte = vencedores reais dos slots 2k e 2k+1.
+   ============================================================ */
+const R32MAP = [
+  {h:{g:"E",pos:1}, a:{pos:3}},        // 0  E1 × 3º
+  {h:{g:"I",pos:1}, a:{pos:3}},        // 1  I1 × 3º
+  {h:{g:"A",pos:2}, a:{g:"B",pos:2}},  // 2  A2 × B2  (África do Sul × Canadá)
+  {h:{g:"F",pos:1}, a:{g:"C",pos:2}},  // 3  F1 × C2
+  {h:{g:"K",pos:2}, a:{g:"L",pos:2}},  // 4  K2 × L2
+  {h:{g:"H",pos:1}, a:{g:"J",pos:2}},  // 5  H1 × J2
+  {h:{g:"D",pos:1}, a:{pos:3}},        // 6  D1 × 3º
+  {h:{g:"G",pos:1}, a:{pos:3}},        // 7  G1 × 3º
+  {h:{g:"C",pos:1}, a:{g:"F",pos:2}},  // 8  C1 × F2
+  {h:{g:"E",pos:2}, a:{g:"I",pos:2}},  // 9  E2 × I2
+  {h:{g:"A",pos:1}, a:{pos:3}},        // 10 A1 × 3º
+  {h:{g:"L",pos:1}, a:{pos:3}},        // 11 L1 × 3º
+  {h:{g:"J",pos:1}, a:{g:"H",pos:2}},  // 12 J1 × H2
+  {h:{g:"D",pos:2}, a:{g:"G",pos:2}},  // 13 D2 × G2
+  {h:{g:"B",pos:1}, a:{pos:3}},        // 14 B1 × 3º
+  {h:{g:"K",pos:1}, a:{pos:3}}         // 15 K1 × 3º
+];
+// time(norm) -> {g,pos} a partir dos colocados reais (1º/2º/3º) por grupo
+function posIndexReais(){
+  const m={};
+  for(const g of Object.keys(GRUPOS)){
+    const c=colocadosReais(g); // [1º,2º,3º] reais (null se grupo incompleto)
+    if(c) c.forEach((t,i)=>{ if(t) m[norm(t)]={g,pos:i+1}; });
+  }
+  return m;
+}
+const matchSpec=(spec,p)=> !!p && (spec.g? spec.g===p.g : true) && (spec.pos? spec.pos===p.pos : true);
+// slot r32 de um confronto real (nas duas orientações); -1 se não casar
+function slotR32(ev, posIdx){
+  const ph=posIdx[norm(ev.h)], pa=posIdx[norm(ev.a)];
+  if(!ph||!pa) return -1;
+  for(let i=0;i<R32MAP.length;i++){
+    const m=R32MAP[i];
+    if(matchSpec(m.h,ph)&&matchSpec(m.a,pa)) return i;
+    if(matchSpec(m.h,pa)&&matchSpec(m.a,ph)) return i;
+  }
+  return -1;
+}
+const timesSlot=(rk,i)=>{ const s=S.res.ko[rk]&&S.res.ko[rk][i]; return [norm(s&&s.h),norm(s&&s.a)].filter(Boolean); };
+// slot da rodada seguinte por árvore: slot k é alimentado pelos slots 2k e 2k+1 da anterior
+function slotArvore(prevRk, nSlots, ev){
+  const X=norm(ev.h), Y=norm(ev.a);
+  for(let k=0;k<nSlots;k++){
+    const A=timesSlot(prevRk,2*k), B=timesSlot(prevRk,2*k+1);
+    if((A.includes(X)&&B.includes(Y))||(A.includes(Y)&&B.includes(X))) return k;
+  }
+  return -1;
+}
+
+/* ============================================================
    MOTOR DE PONTUAÇÃO
    ============================================================ */
 const norm = s => (s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]/g,"");
@@ -198,32 +254,22 @@ function placarLinha(p,r){ // confronto distinto: compara maior×menor
 }
 const samePair=(p,r)=> (norm(p.h)&&norm(p.a)) && ((norm(p.h)===norm(r.h)&&norm(p.a)===norm(r.a))||(norm(p.h)===norm(r.a)&&norm(p.a)===norm(r.h)));
 
-// Pontua uma rodada do mata-mata: pareia confrontos idênticos em qualquer posição; sobras comparam linha de placar por índice
+// Pontua uma rodada do mata-mata POR SLOT do chaveamento: pred[i] × real[i] (mesma posição da chave).
+// Com os reais já alocados na posição oficial, o pareamento é determinístico:
+//   par idêntico → pontuação plena (ptsJogo, com inversão de mando); confronto distinto → linha de placar.
 function scoreRoundKO(preds, reals, comSlot){
-  const used=new Set();
-  const out=preds.map(()=>null);
-  preds.forEach((p,i)=>{
-    const j=reals.findIndex((r,k)=>!used.has(k)&&samePair(p,r));
-    if(j>=0){
-      used.add(j);
-      const r=reals[j];
-      let sc;
-      if([r.sh,r.sa].every(has)){
-        const inv = norm(p.h)!==norm(r.h);
-        sc = ptsJogo(p.ph,p.pa, inv?r.sa:r.sh, inv?r.sh:r.sa);
-      } else sc={pts:0,regra:"aguardando"};
-      out[i]={placar:sc, real:r};
+  const out=preds.map((p,i)=>{
+    const r=reals[i];
+    let sc;
+    if(!r || !(r.h||r.a) || ![r.sh,r.sa].every(has)){
+      sc={pts:0,regra:"aguardando"};
+    } else if(samePair(p,r)){
+      const inv = norm(p.h)!==norm(r.h);
+      sc = ptsJogo(p.ph,p.pa, inv?r.sa:r.sh, inv?r.sh:r.sa);
+    } else {
+      sc = placarLinha(p,r);
     }
-  });
-  // sobras: pareia palpites não casados com jogos reais não consumidos, em ordem (sem dupla contagem)
-  const sobraReal = reals.map((r,k)=>k).filter(k=>!used.has(k)&&reals[k]&&(reals[k].h||reals[k].a||has(reals[k].sh)));
-  let li=0;
-  preds.forEach((p,i)=>{
-    if(out[i]) return;
-    const k=sobraReal[li++];
-    const r=k!==undefined?reals[k]:null;
-    const sc = r ? placarLinha(p,r) : {pts:0,regra:"aguardando"};
-    out[i]={placar:sc, real:r};
+    return {placar:sc, real:r||null};
   });
   // Slots (classificado na posição correta)
   let slotPts=0, slotHits=[];
@@ -402,18 +448,19 @@ function renderRules(){
     <tr><td>2º colocado do grupo</td><td class="pts p10">15</td></tr>
     <tr><td>3º colocado do grupo</td><td class="pts p10">10</td></tr>
     <tr><th colspan="2">Oitavas em diante</th></tr>
-    <tr><td>Classificado na posição correta (por time)</td><td class="pts p10">20</td></tr>
+    <tr><td>Classificado presente na rodada (por time)</td><td class="pts p10">20</td></tr>
     <tr><td>Campeão</td><td class="pts p10">50</td></tr>
     <tr><td>Vice-campeão</td><td class="pts p10">30</td></tr>
     <tr><td>Terceiro lugar</td><td class="pts p10">20</td></tr>
     <tr><td>Artilheiro</td><td class="pts p10">30</td></tr>
   </table>
   <div class="note" style="margin-top:12px"><b>Regras gerais:</b> placar considerado até 90 min + acréscimos (sem prorrogação/pênaltis). Mesmo errando os classificados, o placar do jogo continua valendo. Pontuação creditada ao final de cada rodada.</div>
-  <div class="note y"><b>Interpretações adotadas (CONFIG):</b><br>
-  1) <span style="font-family:var(--mono)">slotEscopo="rodada"</span>: time previsto presente na rodada real (oitavas em diante) = 20 pts — robusto à ordem dos confrontos na chave.<br>
-  2) Confronto previsto idêntico a um confronto real da mesma rodada (em qualquer posição) → pontuação completa da 1ª fase.<br>
-  3) Confronto distinto → comparação por linha de placar (maior×menor): em cheio 10, escore do vencedor 8, do perdedor 7.<br>
-  4) 3º colocado pontua 10 mesmo fora dos 8 melhores; participantes da disputa de 3º lugar não geram pontos de classificado.</div>
+  <div class="note y"><b>Interpretações adotadas (mata-mata por chaveamento):</b><br>
+  1) Cada confronto do mata-mata é pontuado <b>por posição na chave</b>: seu palpite de um slot é comparado ao jogo real que ocupa <i>aquele mesmo slot</i>. O jogo real é alocado ao slot oficial — definido pelas colocações de grupo (ex.: <span style="font-family:var(--mono)">2º A × 2º B</span>) nos 32-avos e pela árvore da chave nas rodadas seguintes —, <b>não</b> pela ordem cronológica dos jogos.<br>
+  2) Palpite com os <b>mesmos times</b> do confronto real do slot → pontuação cheia da 1ª fase (10/8/7/5/8), com o mando ajustado automaticamente.<br>
+  3) Times errados, mas no slot certo → comparação por <b>linha de placar</b> (maior×menor): em cheio 10, escore do vencedor 8, do perdedor 7.<br>
+  4) <b>Classificado</b> (20 pts, oitavas em diante): time previsto presente em qualquer confronto real da rodada — <span style="font-family:var(--mono)">slotEscopo="rodada"</span>, robusto à ordem dos jogos na chave.<br>
+  5) 3º colocado pontua 10 mesmo fora dos 8 melhores; participantes da disputa de 3º lugar não geram pontos de classificado.</div>
   </div></div>`;
 }
 
@@ -552,15 +599,29 @@ async function overlayESPN(){
     }catch(e){}
   }
   koEvents.sort((a,b)=>a.when-b.when);
-  const layout=[["r32",16],["r16",8],["qf",4],["sf",2],["third",1],["final",1]];
-  let idx=0,nK=0;
-  for(const [rk,n] of layout){
-    for(let i=0;i<n&&idx<koEvents.length;i++,idx++){
-      const e=koEvents[idx];
-      const slot=(rk==="third"||rk==="final")?S.res.ko[rk]:S.res.ko[rk][i];
-      if(emptyKO(slot)){ slot.h=e.h; slot.a=e.a; slot.sh=e.sh; slot.sa=e.sa; slot.f=e.pens?"⚠ pênaltis — conferir placar de 90 min":""; nK++; }
-    }
+  // Alocação por POSIÇÃO no chaveamento (não cronológica): cada jogo real cai no slot oficial.
+  // r32 via (grupo,posição) dos classificados; r16/qf/sf via árvore (slot k = vencedores dos
+  // slots 2k e 2k+1 da rodada anterior). Processado em ordem cronológica, garantindo que a
+  // rodada anterior já esteja alocada antes da seguinte. NÃO destrutivo (só preenche slot vazio).
+  let nK=0;
+  const fillKO=(rk,i,e)=>{ const s=(rk==="third"||rk==="final")?S.res.ko[rk]:S.res.ko[rk][i];
+    if(s&&emptyKO(s)){ s.h=e.h; s.a=e.a; s.sh=e.sh; s.sa=e.sa; s.f=e.pens?"⚠ pênaltis — conferir placar de 90 min":""; nK++; } };
+  const posIdx=posIndexReais();
+  const finalPend=[];
+  for(const e of koEvents){
+    let i=slotR32(e,posIdx);  if(i>=0){ fillKO("r32",i,e); continue; }
+    i=slotArvore("r32",8,e);  if(i>=0){ fillKO("r16",i,e); continue; }
+    i=slotArvore("r16",4,e);  if(i>=0){ fillKO("qf",i,e);  continue; }
+    i=slotArvore("qf",2,e);   if(i>=0){ fillKO("sf",i,e);  continue; }
+    // só é final/3º se ambos os times saírem de semis JÁ alocadas (evita mis-slot de jogo não casado)
+    const sfTeams=[...timesSlot("sf",0),...timesSlot("sf",1)];
+    if(sfTeams.length===4 && [norm(e.h),norm(e.a)].every(t=>sfTeams.includes(t))) finalPend.push(e);
+    // caso contrário: deixado pendente (sem alocação), nunca atribuído a slot errado
   }
+  // disputa de 3º precede a final no calendário → o 1º cronológico é o 3º lugar
+  finalPend.sort((a,b)=>a.when-b.when);
+  if(finalPend[0]) fillKO("third",0,finalPend[0]);
+  if(finalPend[1]) fillKO("final",0,finalPend[1]);
   const fin=S.res.ko.final, thr=S.res.ko.third;
   if(!S.res.awards.campeao && fin.h&&has(fin.sh)&&has(fin.sa)&&fin.sh!==fin.sa){
     S.res.awards.campeao=+fin.sh>+fin.sa?fin.h:fin.a; S.res.awards.vice=+fin.sh>+fin.sa?fin.a:fin.h;
